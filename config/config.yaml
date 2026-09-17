@@ -1,0 +1,12 @@
+chessboard:
+  pattern_size: [9, 6]
+  square_size_mm: 25.0
+calibration:
+  min_images: 12
+  left_images_dir: "data/calibration/left"
+  right_images_dir: "data/calibration/right"
+stereo:
+  num_disparities: 128
+  block_size: 5
+paths:
+  output_dir: "output"
