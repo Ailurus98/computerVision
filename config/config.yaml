@@ -3,10 +3,10 @@ chessboard:
   square_size_mm: 25.0
 calibration:
   min_images: 12
-  left_images_dir: "data/calibration/left"
-  right_images_dir: "data/calibration/right"
+  left_images_dir: "../data/calibration/left"
+  right_images_dir: "../data/calibration/right"
 stereo:
   num_disparities: 128
   block_size: 5
 paths:
-  output_dir: "output"
+  output_dir: "../output"

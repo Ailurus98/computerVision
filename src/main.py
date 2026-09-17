@@ -44,8 +44,8 @@ def run_calibrate(config: dict, output_dir: str) -> None:
     logger.info("Saved calibration: %s; paired corners shape=%s", path, np.shape(corners_l))
 
 
-def run_reconstruct(left_path: str, right_path: str, config: dict, output_dir: str) -> None:
-    """Input same-rig image paths, YAML settings, output directory; return None.
+def run_reconstruct(left_path: str, right_path: str, config: dict, output_dir: str):
+    """Input same-rig image paths, YAML settings, output; return points (mm), colors (RGB).
 
     Save rectified PNGs, disparity heatmap (px), depth.npy (mm), PLY (mm/RGB), preview.
     """
@@ -94,12 +94,19 @@ def run_reconstruct(left_path: str, right_path: str, config: dict, output_dir: s
     pointcloud.save_ply(str(output / "pointcloud.ply"), points, colors)
     visualize.show_point_cloud_preview(points, colors, str(output / "pointcloud_preview.png"))
     logger.info("Stage 4 point cloud end: points shape=%s colors shape=%s", points.shape, colors.shape)
+    return points, colors
 
 
 def main(argv=None) -> int:
     """Input optional CLI argument strings; return exit status (0 success, 1 failure)."""
     parser = argparse.ArgumentParser(description="Stereo depth estimation and 3D reconstruction")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    default_config = str(Path(__file__).resolve().parents[1] / "config" / "config.yaml")
+    demo = sub.add_parser("demo", help="Choose one of three portable interactive examples")
+    demo.add_argument("--scene", choices=("1", "2", "3"))
+    demo.add_argument("--headless", action="store_true", help="Save results without opening windows")
+    demo.add_argument("--output", help="Override the portable user-cache output directory")
+    demo.add_argument("--config", default=default_config)
     calibrate = sub.add_parser("calibrate", help="Calibrate from synchronized chessboard images")
     calibrate.add_argument("--config", required=True)
     reconstruct = sub.add_parser("reconstruct", help="Reconstruct one pair from the calibrated rig")
@@ -109,7 +116,13 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     utils.setup_logging()
     try:
-        config = utils.load_config(args.config)
+        config = utils.load_config(getattr(args, "config", default_config))
+        if args.command in (None, "demo"):
+            from src.demo import run_demo
+
+            run_demo(config, getattr(args, "scene", None), getattr(args, "headless", False),
+                     getattr(args, "output", None))
+            return 0
         output = Path(config["paths"]["output_dir"])
         output.mkdir(parents=True, exist_ok=True)
         if args.command == "calibrate":

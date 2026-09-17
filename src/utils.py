@@ -1,6 +1,7 @@
 """Shared utilities: config loading, logging, image I/O, validation."""
 import logging
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -35,6 +36,11 @@ def load_config(path: str) -> dict:
     minimum = config["calibration"]["min_images"]
     if type(minimum) is not int or minimum <= 0:
         raise ValueError("calibration.min_images must be a positive integer")
+    base = Path(path).expanduser().resolve().parent
+    for section, key in (("calibration", "left_images_dir"),
+                         ("calibration", "right_images_dir"), ("paths", "output_dir")):
+        value = Path(config[section][key]).expanduser()
+        config[section][key] = str(value if value.is_absolute() else (base / value).resolve())
     return config
 
 
