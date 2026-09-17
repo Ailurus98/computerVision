@@ -15,9 +15,9 @@ def disparity_to_depth(disparity: np.ndarray, focal_length_px: float, baseline_m
         baseline_mm: camera baseline in millimeters (from stereo translation T).
     Outputs: float32 depth map (H, W) in millimeters; d <= 0 maps to np.inf.
     """
-    if baseline_mm <= 0:
+    if not np.isfinite(baseline_mm) or baseline_mm <= 0:
         raise ValueError(f"baseline_mm must be positive, got {baseline_mm}")
-    if focal_length_px <= 0:
+    if not np.isfinite(focal_length_px) or focal_length_px <= 0:
         raise ValueError(f"focal_length_px must be positive, got {focal_length_px}")
     disparity = np.asarray(disparity, dtype=np.float32)
     depth = np.full(disparity.shape, np.inf, dtype=np.float32)

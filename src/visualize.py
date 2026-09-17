@@ -1,13 +1,12 @@
 """Static (matplotlib) and optional interactive (Open3D) visualizations."""
 import logging
 
-import cv2
 import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
 
 matplotlib.use("Agg")
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,7 @@ def show_point_cloud_preview(points: np.ndarray, colors: np.ndarray, save_path: 
     Inputs: points (N, 3) in mm, colors (N, 3) uint8 RGB 0-255, output PNG path.
     Outputs: None; writes save_path.
     """
-    step = max(1, points.shape[0] // 50000)
+    step = max(1, (points.shape[0] + 49999) // 50000)
     pts, cols = points[::step], colors[::step]
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")

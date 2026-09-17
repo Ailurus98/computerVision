@@ -31,9 +31,12 @@ def build_point_cloud(points_3d: np.ndarray, color_image: np.ndarray,
     Outputs: (points (N, 3) float32 in mm, colors (N, 3) uint8 RGB in 0-255).
     Points with disparity <= min_disparity or non-finite coordinates are removed.
     """
-    h, w = disparity.shape[:2]
-    colors_bgr = cv2.resize(color_image, (w, h)) if color_image.shape[:2] != (h, w) else color_image
-    mask = (disparity > min_disparity) & np.isfinite(points_3d).all(axis=2)
+    if (disparity.ndim != 2 or points_3d.shape != disparity.shape + (3,)
+            or color_image.shape != points_3d.shape):
+        raise ValueError("Point, color, and disparity image shapes must agree")
+    colors_bgr = color_image
+    mask = ((disparity > min_disparity) & np.isfinite(disparity)
+            & np.isfinite(points_3d).all(axis=2))
     points = points_3d[mask].astype(np.float32)
     colors = cv2.cvtColor(colors_bgr, cv2.COLOR_BGR2RGB)[mask].astype(np.uint8)
     logger.info("Point cloud: %d points kept of %d", points.shape[0], mask.size)
@@ -46,6 +49,10 @@ def save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
     Inputs: output path, points (N, 3) float32 (mm), colors (N, 3) uint8 (0-255).
     Outputs: None; raises IOError on write failure.
     """
+    if (points.ndim != 2 or points.shape[1] != 3 or colors.shape != points.shape
+            or not np.isfinite(points).all() or not np.isfinite(colors).all()
+            or np.any(colors < 0) or np.any(colors > 255)):
+        raise ValueError("PLY requires finite (N, 3) points and matching RGB colors in 0..255")
     if points.shape[0] != colors.shape[0]:
         raise ValueError(
             f"points/colors count mismatch: {points.shape[0]} vs {colors.shape[0]}"

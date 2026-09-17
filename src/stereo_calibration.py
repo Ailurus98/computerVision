@@ -14,9 +14,11 @@ def stereo_calibrate(K1, dist1, K2, dist2, objpoints, imgpoints_l, imgpoints_r, 
         object/image points from calibration chessboards, image size (w, h).
     Outputs: dict with "R" (3x3), "T" (3x1, mm), "E", "F".
     """
+    if not objpoints or not (len(objpoints) == len(imgpoints_l) == len(imgpoints_r)):
+        raise ValueError("Stereo calibration requires equally sized nonempty point lists")
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5)
     flags = cv2.CALIB_FIX_INTRINSIC
-    rms, _, _, R, T, E, F = cv2.stereoCalibrate(
+    rms, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
         objpoints, imgpoints_l, imgpoints_r,
         K1, dist1, K2, dist2, image_size,
         criteria=criteria, flags=flags,

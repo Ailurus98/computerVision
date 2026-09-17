@@ -15,8 +15,27 @@ def load_config(path: str) -> dict:
     """
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Config file not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML configuration: {path}: {exc}") from exc
+    required = {
+        "chessboard": ("pattern_size", "square_size_mm"),
+        "calibration": ("min_images", "left_images_dir", "right_images_dir"),
+        "stereo": ("num_disparities", "block_size"),
+        "paths": ("output_dir",),
+    }
+    for section, keys in required.items():
+        if not isinstance(config, dict) or not isinstance(config.get(section), dict):
+            raise ValueError(f"Missing configuration section {section}: {path}")
+        for key in keys:
+            if key not in config[section]:
+                raise ValueError(f"Missing configuration key {section}.{key}: {path}")
+    minimum = config["calibration"]["min_images"]
+    if type(minimum) is not int or minimum <= 0:
+        raise ValueError("calibration.min_images must be a positive integer")
+    return config
 
 
 def setup_logging(level: str = "INFO") -> None:
