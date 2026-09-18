@@ -1,5 +1,6 @@
-from pathlib import Path
+import io
 
+import cv2
 import numpy as np
 import pytest
 import yaml
@@ -21,16 +22,26 @@ def test_paths_relative_to_config(settings, tmp_path, monkeypatch):
     assert result["calibration"]["left_images_dir"] == str(tmp_path / "left")
 
 
-@pytest.mark.parametrize("scene", ["1", "2", "3"])
-def test_scene_popup_order(scene, settings, tmp_path, chessboards, monkeypatch):
+@pytest.fixture
+def scene_folder(tmp_path):
+    folder = tmp_path / "scenes" / "Fake-perfect"
+    folder.mkdir(parents=True)
+    image = np.full((1000, 1000, 3), 128, np.uint8)[:, :, ::-1]
+    for filename in ("im0.png", "im1.png"):
+        assert cv2.imwrite(str(folder / filename), image)
+    (folder / "calib.txt").write_text(
+        "cam0=[721.5377 0 609.5593; 0 721.5377 172.854; 0 0 1]\n"
+        "doffs=131.111\nbaseline=193.001\nndisp=272\nwidth=1000\nheight=1000\n", encoding="utf-8")
+    return folder
+
+def test_scene_popup_order(scene, settings, scene_folder, monkeypatch):
     events = []
-    monkeypatch.setattr(demo, "cache_directory", lambda: tmp_path)
-    folders = tmp_path / "left", tmp_path / "right"
-    for source, folder in zip(chessboards, folders):
-        folder.mkdir()
-        index = demo.SCENES[scene][1]
-        (folder / f"{index}.jpg").write_bytes((source / f"{index}.png").read_bytes())
-    monkeypatch.setattr(demo, "prepare_reference_data", lambda root: folders)
+    monkeypatch.setattr(demo, "cache_directory", lambda: tmp_path_factory.getbasetemp() if False else scene_folder.parent.parent)
+    folders = (tmp_path / "calibration" / "left", tmp_path / "calibration" / "right")
+    for side in folders:
+        side.mkdir(parents=True)
+    monkeypatch.setattr(demo, "prepare_scenes", lambda root: {demo.SCENES[scene][1]: scene_folder})
+    monkeypatch.setattr(demo, "prepare_chessboards", lambda root: folders)
     monkeypatch.setattr(visualize, "enable_interactive", lambda: True)
     monkeypatch.setattr(visualize, "show_input_pair", lambda *args: events.append("photos"))
     monkeypatch.setattr(main, "run_calibrate", lambda *args: events.append("calibrate"))
@@ -39,9 +50,12 @@ def test_scene_popup_order(scene, settings, tmp_path, chessboards, monkeypatch):
         events.append("reconstruct")
         return np.ones((2, 3)), np.ones((2, 3), np.uint8)
 
-    monkeypatch.setattr(main, "run_reconstruct", reconstruct)
+    monkeypatch.setattr(main, "run_scene_reconstruction", reconstruct)
     monkeypatch.setattr(visualize, "show_point_cloud_interactive", lambda *args: events.append("3d"))
-    demo.run_demo(settings, scene)
+    config = {key: dict(value) for key, value in settings.items()}
+    config["calibration"]["left_images_dir"] = str(folders[0])
+    config["calibration"]["right_images_dir"] = str(folders[1])
+    demo.run_demo(config, scene)
     assert events == ["photos", "calibrate", "reconstruct", "3d"]
 
 

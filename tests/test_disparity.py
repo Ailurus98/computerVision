@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from src.disparity import compute_disparity
+from src.disparity import compute_disparity, compute_disparity_filtered
 from src.depth import disparity_to_depth
 
 

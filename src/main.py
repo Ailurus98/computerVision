@@ -97,6 +97,64 @@ def run_reconstruct(left_path: str, right_path: str, config: dict, output_dir: s
     return points, colors
 
 
+def run_scene_reconstruction(left_path, right_path, config, output_dir, intermediates=False):
+    """Input: rectified BGR paths, stereo f/cx/cy/doffs (px), baseline_mm, output, steps flag.
+
+    Output: finite XYZ float32 (N,3) in mm and RGB uint8; save depth (mm), PNGs and PLY.
+    No calibration archive or square size is used; omitted cx/cy default to image center.
+    """
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    settings = dict(config["stereo"])
+    f, doffs, baseline = (float(settings.pop(key)) for key in ("f", "doffs", "baseline_mm"))
+    left, right = utils.load_image_color(str(left_path)), utils.load_image_color(str(right_path))
+    utils.validate_image_pair_shapes(left, right)
+    cx, cy = float(settings.pop("cx", left.shape[1] / 2)), float(settings.pop("cy", left.shape[0] / 2))
+    if not np.isfinite([f, doffs, baseline, cx, cy]).all() or f <= 0 or baseline <= 0:
+        raise ValueError("Scene intrinsics must be finite with positive f and baseline_mm")
+    logger.info("Stage 1 rectified grayscale start: shape=%s", left.shape)
+    gray_l, gray_r = (cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) for image in (left, right))
+    logger.info("Stage 1 rectified grayscale end: left=%s right=%s", gray_l.shape, gray_r.shape)
+    logger.info("Stage 2 filtered disparity start: shape=%s", gray_l.shape)
+    raw, filtered, valid = disparity.compute_disparity_filtered(gray_l, gray_r, settings)
+    filtered = np.where(valid, filtered, np.nan).astype(np.float32)
+    logger.info("Stage 2 filtered disparity end: raw=%s filtered=%s", raw.shape, filtered.shape)
+    logger.info("Stage 3 depth start: shape=%s", filtered.shape)
+    denominator = filtered + doffs
+    depth = np.full(filtered.shape, np.nan, np.float32)
+    np.divide(baseline * f, denominator, out=depth, where=np.isfinite(denominator) & (denominator > 0))
+    np.save(output / "depth.npy", depth)
+    logger.info("Stage 3 depth end: shape=%s; saved %s", depth.shape, output / "depth.npy")
+    logger.info("Stage 4 point cloud start: shape=%s", depth.shape)
+    v, u = np.indices(depth.shape, dtype=np.float32)
+    xyz = np.stack(((u - cx) * depth / f, (v - cy) * depth / f, depth), axis=-1)
+    finite = np.isfinite(xyz).all(axis=-1)
+    points, colors = xyz[finite], cv2.cvtColor(left, cv2.COLOR_BGR2RGB)[finite]
+    pointcloud.save_ply(str(output / "pointcloud.ply"), points, colors)
+    visualize.show_point_cloud_preview(points, colors, str(output / "pointcloud_preview.png"))
+    logger.info("Stage 4 point cloud end: points=%s colors=%s", points.shape, colors.shape)
+
+    def save_stage(path, image, colored=False):
+        """Input: PNG path, image (px or mm), jet flag; output: None, normalized uint8 PNG."""
+        mask = np.isfinite(image).astype(np.uint8)
+        normalized = cv2.normalize(np.where(mask, image, 0), None, 0, 255, cv2.NORM_MINMAX,
+                                   dtype=cv2.CV_8U, mask=mask)
+        if colored:
+            normalized = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+        if not cv2.imwrite(str(path), normalized):
+            raise OSError(f"Could not write image: {path}")
+        logger.info("Saved stage: %s; shape=%s", path, normalized.shape)
+
+    save_stage(output / "disparity.png", filtered, True)
+    if intermediates:
+        steps = output / "steps"
+        steps.mkdir(parents=True, exist_ok=True)
+        for name, image in (("rectified_left", gray_l), ("rectified_right", gray_r),
+                            ("disparity_raw", raw), ("disparity_filtered", filtered), ("depth", depth)):
+            save_stage(steps / f"{name}.png", image, name.startswith("disparity"))
+    return points, colors
+
+
 def main(argv=None) -> int:
     """Input optional CLI argument strings; return exit status (0 success, 1 failure)."""
     parser = argparse.ArgumentParser(description="Stereo depth estimation and 3D reconstruction")
