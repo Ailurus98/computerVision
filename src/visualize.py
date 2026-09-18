@@ -79,13 +79,15 @@ def _draw_cloud(ax, points, colors, title, max_points):
     if np.any((cols < 0) | (cols > 255)):
         raise ValueError("RGB colors must be in the range 0-255")
     ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Z (mm)")
-    ax.set_zlabel("Y (mm)")
+    ax.set_ylabel("Z (mm, depth)")
+    ax.set_zlabel("Y (mm, up)")
     if not len(pts):
         ax.set_title(f"{title}\nNo finite points to display")
         ax.set_box_aspect((1, 1, 1))
         return
-    xyz = pts[:, [0, 2, 1]]
+    # Camera: X right, Y down, Z forward. Plot: X right, Y depth, Z up.
+    # Negate Y so up is up (was upside-down), keep Z as depth.
+    xyz = np.stack([pts[:, 0], pts[:, 2], -pts[:, 1]], axis=1)
     lower = np.percentile(xyz, 1, axis=0)
     upper = np.percentile(xyz, 99, axis=0)
     spans = upper - lower
@@ -97,10 +99,10 @@ def _draw_cloud(ax, points, colors, title, max_points):
     ax.set_zlim(lower[2], upper[2])
     spans = upper - lower
     ax.set_box_aspect(spans / spans.max())
-    # 3/4 view shows depth instead of the flat side-on projection in the
-    # original screenshot (which made the noisy cloud look like a wall).
+    # Straight front view: X horizontal, Y-vertical up, depth into screen.
+    # elev=0 levels the horizon, azim=-90 looks straight down the depth axis.
     try:
-        ax.view_init(elev=18, azim=-60)
+        ax.view_init(elev=0, azim=-90)
     except (AttributeError, ValueError):
         pass
     step = max(1, (len(pts) + max_points - 1) // max_points)

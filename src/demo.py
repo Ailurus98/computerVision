@@ -9,7 +9,6 @@ import urllib.request
 import cv2
 import numpy as np
 from src import utils, visualize
-from src.errors import CalibrationError
 
 logger = logging.getLogger(__name__)
 SOURCE = "https://raw.githubusercontent.com/opencv/opencv/5.x/samples/data"
@@ -173,7 +172,7 @@ def fetch_all_data(root: Path) -> None:
 
 def run_demo(config, scene=None, headless=False, output_dir=None):
     """Input: config, scene 1..3, headless flag, output path; output: None, exports XYZ/depth in mm."""
-    from src.main import run_calibrate, run_scene_reconstruction
+    from src.main import run_scene_reconstruction
     if scene is None:
         for label, (title, _) in SCENES.items():
             logger.info("%s: %s", label, title)
@@ -197,18 +196,6 @@ def run_demo(config, scene=None, headless=False, output_dir=None):
     interactive = not headless and visualize.enable_interactive()
     if interactive:
         visualize.show_input_pair(left, right, title)
-    if settings.get("calibration") and not (output / "calibration.npz").exists():
-        try:
-            if all((root / "calibration" / side).is_dir() for side in ("left", "right")):
-                left_dir, right_dir = prepare_chessboards(root)
-                settings["calibration"].update(left_images_dir=str(left_dir), right_images_dir=str(right_dir))
-                settings["chessboard"]["pattern_size"] = [9, 6]
-            if all(Path(settings["calibration"][key]).is_dir() for key in ("left_images_dir", "right_images_dir")):
-                run_calibrate(settings, str(output))
-            else:
-                logger.warning("Skipping optional chessboard calibration: missing directories")
-        except (OSError, ValueError, CalibrationError) as exc:
-            logger.warning("Skipping optional chessboard calibration: %s", exc)
     result = run_scene_reconstruction(left_path, right_path, settings, str(output), intermediates=True)
     points, colors = result[0], result[1]
     stages = result[2] if len(result) > 2 else None
