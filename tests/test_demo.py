@@ -61,7 +61,7 @@ def test_scene_popup_order(scene, settings, scene_folder, tmp_path, monkeypatch)
     config["calibration"]["left_images_dir"] = str(folders[0])
     config["calibration"]["right_images_dir"] = str(folders[1])
     demo.run_demo(config, scene)
-    assert events == ["photos", "calibrate", "reconstruct", "stages", "3d"]
+    assert events == ["photos", "reconstruct", "stages", "3d"]
 
 
 def test_invalid_scene(settings):

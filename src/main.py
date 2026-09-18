@@ -1,4 +1,4 @@
-"""Demo-only stereo reconstruction CLI (Middlebury scenes)."""
+"""Stereo calibration and reconstruction CLI."""
 import argparse
 import logging
 from pathlib import Path
@@ -11,8 +11,53 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import disparity, pointcloud, utils, visualize
+from src.calibration import calibrate_camera, collect_stereo_points, list_images
+from src.stereo_calibration import apply_rectification, rectify, stereo_calibrate
 
 logger = logging.getLogger(__name__)
+
+
+def run_calibrate(config, output_dir=None):
+    """Run left/right chessboard calibration and save the stereo model."""
+    output = Path(output_dir or config["paths"]["output_dir"]).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+
+    left_dir = config["calibration"]["left_images_dir"]
+    right_dir = config["calibration"]["right_images_dir"]
+    pattern = tuple(config["chessboard"]["pattern_size"])
+    square_size = config["chessboard"]["square_size_mm"]
+    min_images = config["calibration"]["min_images"]
+
+    left_paths = list_images(left_dir)
+    right_paths = list_images(right_dir)
+    left_result = calibrate_camera(left_paths, pattern, square_size, min_images=min_images)
+    right_result = calibrate_camera(right_paths, pattern, square_size, min_images=min_images)
+    objpoints, imgpoints_l, imgpoints_r, image_size = collect_stereo_points(
+        left_paths, right_paths, pattern, square_size, min_images=min_images
+    )
+    stereo = stereo_calibrate(
+        left_result["K"], left_result["dist"], right_result["K"], right_result["dist"],
+        objpoints, imgpoints_l, imgpoints_r, image_size
+    )
+    rectification = rectify(
+        left_result["K"], left_result["dist"], right_result["K"], right_result["dist"],
+        stereo["R"], stereo["T"], image_size
+    )
+    archive = {
+        "K_left": left_result["K"],
+        "dist_left": left_result["dist"],
+        "K_right": right_result["K"],
+        "dist_right": right_result["dist"],
+        "rms_left": float(left_result["rms_error"]),
+        "rms_right": float(right_result["rms_error"]),
+        "R": stereo["R"],
+        "T": stereo["T"],
+        "E": stereo["E"],
+        "F": stereo["F"],
+        "Q": rectification["Q"],
+    }
+    np.savez(output / "calibration.npz", **archive)
+    return archive
 
 
 def run_scene_reconstruction(left_path, right_path, config, output_dir, intermediates=False):
@@ -34,8 +79,6 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
     logger.info("Stage 1 rectified grayscale end: left=%s right=%s", gray_l.shape, gray_r.shape)
     logger.info("Stage 2 filtered disparity start: shape=%s", gray_l.shape)
     raw, filtered, valid = disparity.compute_disparity_filtered(gray_l, gray_r, settings)
-    # Occlusion strip: left border of width numDisparities has no right match
-    # (epipolar geometry, Module 2). This removes the smeared left-edge wall.
     ndisp = settings.get("numDisparities", settings.get("num_disparities", 0))
     try:
         ndisp = int(ndisp)
@@ -50,7 +93,7 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
     denominator = filtered + doffs
     depth = np.full(filtered.shape, np.nan, np.float32)
     np.divide(baseline * f, denominator, out=depth, where=np.isfinite(denominator) & (denominator > 0))
-    depth, cap = pointcloud.cap_depth_outliers(depth, 99.5)
+    depth, _ = pointcloud.cap_depth_outliers(depth, 99.5)
     np.save(output / "depth.npy", depth)
     logger.info("Stage 3 depth end: shape=%s; saved %s", depth.shape, output / "depth.npy")
     logger.info("Stage 4 point cloud start: shape=%s", depth.shape)
@@ -84,28 +127,76 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
     return points, colors, stages
 
 
+def run_reconstruct(config, left_path, right_path, output_dir=None):
+    """Calibrate from the saved model, rectify the pair, and reconstruct depth."""
+    output = Path(output_dir or config["paths"]["output_dir"]).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    archive = np.load(output / "calibration.npz", allow_pickle=False)
+    K_left = archive["K_left"]
+    dist_left = archive["dist_left"]
+    K_right = archive["K_right"]
+    dist_right = archive["dist_right"]
+    T = archive["T"]
+    R = archive["R"]
+    image_size = (int(K_left.shape[1]), int(K_left.shape[0]))
+    left = utils.load_image_color(str(left_path))
+    right = utils.load_image_color(str(right_path))
+    utils.validate_image_pair_shapes(left, right)
+    rectification = rectify(K_left, dist_left, K_right, dist_right, R, T, image_size)
+    rect_left, rect_right = apply_rectification(left, right, rectification)
+    cv2.imwrite(str(output / "rectified_left.png"), rect_left)
+    cv2.imwrite(str(output / "rectified_right.png"), rect_right)
+
+    settings = dict(config["stereo"])
+    settings.update({
+        "f": float(K_left[0, 0]),
+        "doffs": float(K_left[0, 2]),
+        "baseline_mm": float(np.linalg.norm(T)),
+        "cx": float(K_left[0, 2]),
+        "cy": float(K_left[1, 2]),
+    })
+    run_scene_reconstruction(left_path, right_path, {"stereo": settings}, str(output), intermediates=True)
+    return output
+
+
 def main(argv=None) -> int:
     """Input optional CLI argument strings; return exit status (0 success, 1 failure)."""
-    parser = argparse.ArgumentParser(description="Demo-only stereo depth estimation and 3D reconstruction")
+    parser = argparse.ArgumentParser(description="Stereo calibration and depth reconstruction CLI")
     sub = parser.add_subparsers(dest="command")
     default_config = str(Path(__file__).resolve().parents[1] / "config" / "config.yaml")
+
     demo = sub.add_parser("demo", help="Choose one of three portable interactive examples")
     demo.add_argument("--scene", choices=("1", "2", "3"))
     demo.add_argument("--headless", action="store_true", help="Save results without opening windows")
     demo.add_argument("--output", help="Override the portable user-cache output directory")
     demo.add_argument("--config", default=default_config)
+
+    calibrate = sub.add_parser("calibrate", help="Calibrate left and right camera intrinsics")
+    calibrate.add_argument("--config", default=default_config)
+
+    reconstruct = sub.add_parser("reconstruct", help="Reconstruct depth from a stereo image pair")
+    reconstruct.add_argument("--left", required=True)
+    reconstruct.add_argument("--right", required=True)
+    reconstruct.add_argument("--config", default=default_config)
+
     sub.add_parser("fetch", help="One-time download of all demo photos into the user cache")
     args = parser.parse_args(argv)
     utils.setup_logging()
     try:
         if getattr(args, "command", None) == "fetch":
             from src.demo import cache_directory, fetch_all_data
-
             fetch_all_data(cache_directory())
+            return 0
+        if getattr(args, "command", None) == "calibrate":
+            config = utils.load_config(getattr(args, "config", default_config))
+            run_calibrate(config, config["paths"]["output_dir"])
+            return 0
+        if getattr(args, "command", None) == "reconstruct":
+            config = utils.load_config(getattr(args, "config", default_config))
+            run_reconstruct(config, getattr(args, "left"), getattr(args, "right"), config["paths"]["output_dir"])
             return 0
         config = utils.load_config(getattr(args, "config", default_config))
         from src.demo import run_demo
-
         run_demo(config, getattr(args, "scene", None), getattr(args, "headless", False),
                  getattr(args, "output", None))
         return 0
