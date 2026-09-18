@@ -11,11 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def enable_interactive() -> bool:
-    """Enable a working interactive backend, preferring the current selection.
-
-    Inputs: None (no units). Outputs: bool; False logs a warning if unavailable.
-    Pyplot and Tk are loaded only on demand; a probe figure is created and closed.
-    """
+    """Probe for a working GUI backend; return True or log a warning and False."""
     import matplotlib
 
     errors = (ImportError, RuntimeError, ValueError, OSError)
@@ -29,7 +25,6 @@ def enable_interactive() -> bool:
     original = None
     try:
         import matplotlib.pyplot as plt
-
         original = matplotlib.get_backend()
         try:
             from matplotlib.backends import backend_registry
@@ -91,9 +86,11 @@ def _draw_cloud(ax, points, colors, title, max_points):
         ax.set_box_aspect((1, 1, 1))
         return
     xyz = pts[:, [0, 2, 1]]
-    lower, upper = xyz.min(axis=0), xyz.max(axis=0)
+    lower = np.percentile(xyz, 1, axis=0)
+    upper = np.percentile(xyz, 99, axis=0)
     spans = upper - lower
-    padding = np.maximum(spans * 0.02, max(float(spans.max()) * 0.01, 1e-6))
+    spans[spans <= 0] = 1.0
+    padding = np.maximum(spans * 0.05, float(spans.max()) * 0.02)
     lower, upper = lower - padding, upper + padding
     ax.set_xlim(lower[0], upper[0])
     ax.set_ylim(lower[1], upper[1])
@@ -107,11 +104,7 @@ def _draw_cloud(ax, points, colors, title, max_points):
 
 
 def show_disparity_heatmap(disparity: np.ndarray, save_path: str) -> None:
-    """Save a headless jet heatmap as PNG without changing the global backend.
-
-    Inputs: disparity (H, W) in pixels; save_path output PNG path.
-    Outputs: None; writes save_path.
-    """
+    """Save disparity (H, W) in px as a headless jet PNG; return None."""
     fig = Figure(figsize=(10, 6))
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111)
@@ -125,12 +118,7 @@ def show_disparity_heatmap(disparity: np.ndarray, save_path: str) -> None:
 
 
 def show_point_cloud_preview(points: np.ndarray, colors: np.ndarray, save_path: str) -> None:
-    """Save a headless scatter PNG using at most 50000 deterministic samples.
-
-    Inputs: points (N, 3) XYZ in mm; colors (N, 3) RGB 0-255; output PNG path.
-    Outputs: None; writes save_path. Invalid shapes/colors raise ValueError;
-    non-finite rows are omitted with a warning, empty clouds display a message.
-    """
+    """Save points (N,3) mm with RGB colors as a headless scatter PNG; return None."""
     fig = Figure(figsize=(10, 8))
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111, projection="3d")
@@ -141,11 +129,7 @@ def show_point_cloud_preview(points: np.ndarray, colors: np.ndarray, save_path: 
 
 
 def show_input_pair(left: np.ndarray, right: np.ndarray, title: str = "Stereo input") -> None:
-    """Display stereo photos and block until closed, before reconstruction.
-
-    Inputs: left/right (H, W, 3) uint8 BGR images (0-255), optional title.
-    Outputs: None; skips with a warning if no interactive backend is available.
-    """
+    """Show left/right BGR photos until closed; skip without a GUI; return None."""
     if not enable_interactive():
         return
     import matplotlib.pyplot as plt
@@ -163,24 +147,55 @@ def show_input_pair(left: np.ndarray, right: np.ndarray, title: str = "Stereo in
         plt.close(fig)
 
 
-def show_point_cloud_interactive(
-    points: np.ndarray, colors: np.ndarray, title: str = "Interactive 3D point cloud"
-) -> None:
-    """Display a rotatable scatter with at most 30000 deterministic samples.
-
-    Inputs: points (N, 3) XYZ in mm; colors (N, 3) RGB 0-255; optional title.
-    Outputs: None; blocks until closed or warns and skips without a GUI.
-    Invalid shapes/colors raise ValueError; non-finite rows are omitted with a
-    warning, empty clouds display a message. Axes are X, Z, Y in mm.
-    """
+def show_intermediate_stages(left, right, raw, filtered, depth, title="Stereo stages") -> None:
+    """Show inputs, raw/filtered disparity (px) and depth (mm) until closed; return None."""
     if not enable_interactive():
         return
     import matplotlib.pyplot as plt
 
+    def tonemap(image):
+        finite = np.isfinite(image)
+        norm = np.zeros(image.shape, np.float32)
+        if finite.any():
+            lo, hi = np.nanpercentile(image, (1, 99))
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                lo, hi = float(np.nanmin(image)), float(np.nanmax(image))
+            norm[finite] = np.clip((image[finite] - lo) / max(hi - lo, 1e-6), 0, 1)
+        return (norm * 255).astype(np.uint8)
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    try:
+        axes[0, 0].imshow(left[:, :, ::-1])
+        axes[0, 0].set_title("Left (rectified)")
+        axes[0, 1].imshow(right[:, :, ::-1])
+        axes[0, 1].set_title("Right (rectified)")
+        axes[0, 2].imshow(tonemap(raw), cmap="jet", vmin=0, vmax=255)
+        axes[0, 2].set_title("Raw disparity (SGBM)")
+        axes[1, 0].imshow(tonemap(filtered), cmap="jet", vmin=0, vmax=255)
+        axes[1, 0].set_title("Filtered disparity (LR-checked)")
+        axes[1, 1].imshow(tonemap(depth), cmap="plasma", vmin=0, vmax=255)
+        axes[1, 1].set_title("Depth (mm, 1-99 pct)")
+        valid = np.isfinite(filtered)
+        axes[1, 2].imshow(valid.astype(np.uint8) * 255, cmap="gray")
+        axes[1, 2].set_title(f"Valid: {100.0 * valid.mean():.1f}%")
+        for ax in axes.ravel():
+            ax.set_axis_off()
+        fig.suptitle(f"{title} - close to continue")
+        fig.tight_layout()
+        plt.show(block=True)
+    finally:
+        plt.close(fig)
+
+
+def show_point_cloud_interactive(points, colors, title="Interactive 3D point cloud") -> None:
+    """Show rotatable points (N,3) mm with RGB colors until closed; return None."""
+    if not enable_interactive():
+        return
+    import matplotlib.pyplot as plt
     fig = plt.figure(figsize=(11, 8))
     try:
-        ax = fig.add_subplot(111, projection="3d")
-        _draw_cloud(ax, points, colors, f"{title} - drag to rotate", 30000)
+        _draw_cloud(fig.add_subplot(111, projection="3d"), points, colors,
+                    f"{title} - drag to rotate", 30000)
         fig.tight_layout()
         plt.show(block=True)
     finally:

@@ -98,10 +98,9 @@ def run_reconstruct(left_path: str, right_path: str, config: dict, output_dir: s
 
 
 def run_scene_reconstruction(left_path, right_path, config, output_dir, intermediates=False):
-    """Input: rectified BGR paths, stereo f/cx/cy/doffs (px), baseline_mm, output, steps flag.
+    """Input rectified BGR paths, f/cx/cy/doffs (px), baseline_mm, output, steps flag.
 
-    Output: finite XYZ float32 (N,3) in mm and RGB uint8; save depth (mm), PNGs and PLY.
-    No calibration archive or square size is used; omitted cx/cy default to image center.
+    Output points (N,3) mm, colors RGB, stages dict; saves depth (mm), PNGs, PLY.
     """
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -123,6 +122,11 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
     denominator = filtered + doffs
     depth = np.full(filtered.shape, np.nan, np.float32)
     np.divide(baseline * f, denominator, out=depth, where=np.isfinite(denominator) & (denominator > 0))
+    finite = depth[np.isfinite(depth)]
+    if finite.size:
+        cap = float(np.percentile(finite, 99.5))
+        depth = np.where(np.isfinite(depth) & (depth <= cap), depth, np.nan).astype(np.float32)
+        logger.info("Stage 3 depth range capped at %.1f mm (99.5th percentile)", cap)
     np.save(output / "depth.npy", depth)
     logger.info("Stage 3 depth end: shape=%s; saved %s", depth.shape, output / "depth.npy")
     logger.info("Stage 4 point cloud start: shape=%s", depth.shape)
@@ -135,15 +139,14 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
     logger.info("Stage 4 point cloud end: points=%s colors=%s", points.shape, colors.shape)
 
     def save_stage(path, image, colored=False):
-        """Input: PNG path, image (px or mm), jet flag; output: None, normalized uint8 PNG."""
+        """Write a min-max normalized PNG (jet if colored); return None."""
         mask = np.isfinite(image).astype(np.uint8)
-        normalized = cv2.normalize(np.where(mask, image, 0), None, 0, 255, cv2.NORM_MINMAX,
-                                   dtype=cv2.CV_8U, mask=mask)
+        norm = cv2.normalize(np.where(mask, image, 0), None, 0, 255, cv2.NORM_MINMAX,
+                             dtype=cv2.CV_8U, mask=mask)
         if colored:
-            normalized = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-        if not cv2.imwrite(str(path), normalized):
+            norm = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+        if not cv2.imwrite(str(path), norm):
             raise OSError(f"Could not write image: {path}")
-        logger.info("Saved stage: %s; shape=%s", path, normalized.shape)
 
     save_stage(output / "disparity.png", filtered, True)
     if intermediates:
@@ -152,7 +155,8 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
         for name, image in (("rectified_left", gray_l), ("rectified_right", gray_r),
                             ("disparity_raw", raw), ("disparity_filtered", filtered), ("depth", depth)):
             save_stage(steps / f"{name}.png", image, name.startswith("disparity"))
-    return points, colors
+    stages = {"left": left, "right": right, "raw": raw, "filtered": filtered, "depth": depth}
+    return points, colors, stages
 
 
 def main(argv=None) -> int:
@@ -165,6 +169,7 @@ def main(argv=None) -> int:
     demo.add_argument("--headless", action="store_true", help="Save results without opening windows")
     demo.add_argument("--output", help="Override the portable user-cache output directory")
     demo.add_argument("--config", default=default_config)
+    sub.add_parser("fetch", help="One-time download of all demo photos into the user cache")
     calibrate = sub.add_parser("calibrate", help="Calibrate from synchronized chessboard images")
     calibrate.add_argument("--config", required=True)
     reconstruct = sub.add_parser("reconstruct", help="Reconstruct one pair from the calibrated rig")
@@ -174,6 +179,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     utils.setup_logging()
     try:
+        if getattr(args, "command", None) == "fetch":
+            from src.demo import cache_directory, fetch_all_data
+
+            fetch_all_data(cache_directory())
+            return 0
         config = utils.load_config(getattr(args, "config", default_config))
         if args.command in (None, "demo"):
             from src.demo import run_demo
