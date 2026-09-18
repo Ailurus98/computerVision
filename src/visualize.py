@@ -97,24 +97,46 @@ def _draw_cloud(ax, points, colors, title, max_points):
     ax.set_zlim(lower[2], upper[2])
     spans = upper - lower
     ax.set_box_aspect(spans / spans.max())
+    # 3/4 view shows depth instead of the flat side-on projection in the
+    # original screenshot (which made the noisy cloud look like a wall).
+    try:
+        ax.view_init(elev=18, azim=-60)
+    except (AttributeError, ValueError):
+        pass
     step = max(1, (len(pts) + max_points - 1) // max_points)
     sampled = xyz[::step]
-    ax.scatter(*sampled.T, c=cols[::step] / 255.0, s=0.5, marker=".", depthshade=False)
+    ax.scatter(*sampled.T, c=cols[::step] / 255.0, s=0.8, marker=".", depthshade=False)
     ax.set_title(f"{title}\nShowing {len(sampled):,} of {len(pts):,} finite points")
 
 
 def show_disparity_heatmap(disparity: np.ndarray, save_path: str) -> None:
-    """Save disparity (H, W) in px as a headless jet PNG; return None."""
+    """Save disparity (H, W) in px as a headless jet PNG; return None.
+
+    NaN/inf (occluded/invalid) map to the low end so one bad pixel no longer
+    flattens the whole colormap; display range is the 1-99 percentile.
+    """
     fig = Figure(figsize=(10, 6))
     FigureCanvasAgg(fig)
     ax = fig.add_subplot(111)
-    im = ax.imshow(disparity, cmap="jet")
+    disp = np.asarray(disparity, dtype=np.float32)
+    finite = np.isfinite(disp)
+    if finite.any():
+        lo, hi = np.percentile(disp[finite], (1, 99))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo, hi = float(disp[finite].min()), float(disp[finite].max())
+        if hi <= lo:
+            hi = lo + 1.0
+    else:
+        lo, hi = 0.0, 1.0
+    masked = np.ma.masked_where(~finite, disp)
+    im = ax.imshow(masked, cmap="jet", vmin=lo, vmax=hi)
     fig.colorbar(im, ax=ax, label="disparity (px)")
-    ax.set_title("Disparity Map (SGBM)")
+    valid = 100.0 * float(finite.mean()) if disp.size else 0.0
+    ax.set_title(f"Disparity Map (SGBM, valid {valid:.1f}%)")
     ax.set_axis_off()
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
-    logger.info("Saved disparity heatmap: %s", save_path)
+    logger.info("Saved disparity heatmap: %s (range %.1f-%.1f px)", save_path, lo, hi)
 
 
 def show_point_cloud_preview(points: np.ndarray, colors: np.ndarray, save_path: str) -> None:

@@ -43,6 +43,63 @@ def build_point_cloud(points_3d: np.ndarray, color_image: np.ndarray,
     return points, colors
 
 
+def cap_depth_outliers(depth: np.ndarray, percentile: float = 99.0):
+    """Cap far-depth outliers using a percentile (Module 5 smoothness prior).
+
+    Inputs: depth (H, W) float32 in mm (NaN/inf = invalid), percentile in (0, 100).
+    Outputs: (capped depth with far tails set to NaN, cap value or None).
+    Syllabus: percentile clipping is histogram processing (Module 1).
+    """
+    if not 0.0 < percentile < 100.0:
+        raise ValueError(f"percentile must be in (0, 100), got {percentile}")
+    capped = np.asarray(depth, dtype=np.float32).copy()
+    finite = capped[np.isfinite(capped)]
+    if finite.size == 0:
+        return capped, None
+    cap = float(np.percentile(finite, percentile))
+    capped[np.isfinite(capped) & (capped > cap)] = np.nan
+    logger.info("Depth capped at %.1f mm (%.1fth percentile, %d finite)",
+                cap, percentile, finite.size)
+    return capped, cap
+
+
+def clean_point_cloud(points: np.ndarray, colors: np.ndarray,
+                      z_percentile: float = 99.0, std_ratio: float = 2.5):
+    """Remove far-tail and statistical outliers (Modules 4-5, classical only).
+
+    Inputs: points (N, 3) float32 mm, colors (N, 3) uint8, Z percentile cap,
+        per-axis median +/- std_ratio * std gate.
+    Outputs: filtered (points, colors); empty input returns empty output.
+    No learning / NeRF / deep models: percentile + mean/std gating only.
+    """
+    points = np.asarray(points, dtype=np.float32)
+    colors = np.asarray(colors)
+    if points.shape[0] == 0:
+        return points.reshape(0, 3).astype(np.float32), colors.reshape(0, 3)
+    if points.ndim != 2 or points.shape[1] != 3 or colors.shape != points.shape:
+        raise ValueError("points and RGB colors must have matching (N, 3) shapes")
+    finite = np.isfinite(points).all(axis=1)
+    points, colors = points[finite], colors[finite]
+    if points.shape[0] == 0:
+        return points.astype(np.float32), colors
+    if not 0.0 < z_percentile < 100.0:
+        raise ValueError(f"z_percentile must be in (0, 100), got {z_percentile}")
+    if not np.isfinite(std_ratio) or std_ratio <= 0:
+        raise ValueError(f"std_ratio must be positive, got {std_ratio}")
+    z_cap = float(np.percentile(points[:, 2], z_percentile))
+    keep = points[:, 2] <= z_cap
+    points, colors = points[keep], colors[keep]
+    if points.shape[0] == 0:
+        return points.astype(np.float32), colors
+    median = np.median(points.astype(np.float64), axis=0)
+    std = np.std(points.astype(np.float64), axis=0) + 1e-6
+    keep = (np.abs(points.astype(np.float64) - median) <= std_ratio * std).all(axis=1)
+    points, colors = points[keep], colors[keep]
+    logger.info("Cleaned cloud: %d points kept (Z cap %.1f mm, std_ratio %.2f)",
+                points.shape[0], z_cap, std_ratio)
+    return points.astype(np.float32), colors
+
+
 def save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
     """Write a binary-little-endian PLY point cloud file.
 

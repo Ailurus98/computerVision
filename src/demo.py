@@ -185,7 +185,10 @@ def run_demo(config, scene=None, headless=False, output_dir=None):
     folder = prepare_scenes(root)[name]
     settings = {key: dict(value) for key, value in config.items()}
     calib = parse_calib(folder / "calib.txt")
-    settings["stereo"] = dict(num_disparities={"1": 272, "2": 288, "3": 640}[scene], block_size=5,
+    # Syllabus-only tuning: block 5->7 = larger Module-1 aggregation window
+    # (smoother, fewer speckles); LR + median checks = Module-2 matching test.
+    settings["stereo"] = dict(num_disparities={"1": 272, "2": 288, "3": 640}[scene], block_size=7,
+                              lr_max_diff=1.0, median_max_diff=2.0,
                               f=calib["f"], doffs=calib["doffs"], baseline_mm=calib["baseline"], cx=calib["cx"], cy=calib["cy"])
     output = Path(output_dir).expanduser().resolve() if output_dir else root / "output" / f"scene{scene}"
     output.mkdir(parents=True, exist_ok=True)

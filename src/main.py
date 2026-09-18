@@ -79,18 +79,49 @@ def run_reconstruct(left_path: str, right_path: str, config: dict, output_dir: s
     gray_l = cv2.cvtColor(rect_left, cv2.COLOR_BGR2GRAY)
     gray_r = cv2.cvtColor(rect_right, cv2.COLOR_BGR2GRAY)
     logger.info("Stage 2 disparity start: shape=%s", gray_l.shape)
-    disp = disparity.compute_disparity(gray_l, gray_r, config["stereo"])
+    # Syllabus Module 2 (stereo matching) + Module 1 (filtering):
+    # LR consistency + 3x3 median residual rejects occlusions/mismatches
+    # that caused the streaky/floating points in the raw SGBM cloud.
+    stereo_params = dict(config["stereo"])
+    for key in ("f", "doffs", "baseline_mm", "cx", "cy"):
+        stereo_params.pop(key, None)
+    lr_max = stereo_params.pop("lr_max_diff", 1.0)
+    median_max = stereo_params.pop("median_max_diff", 2.0)
+    raw, filtered, valid = disparity.compute_disparity_filtered(
+        gray_l, gray_r, {**stereo_params, "lr_max_diff": lr_max,
+                         "median_max_diff": median_max})
+    disp = np.where(valid, filtered, np.nan).astype(np.float32)
+    # Occlusion strip: left border of width numDisparities has no right match.
+    try:
+        ndisp = int(stereo_params.get("numDisparities",
+                                      stereo_params.get("num_disparities", 128)))
+    except (TypeError, ValueError):
+        ndisp = 128
+    if ndisp > 0 and ndisp < disp.shape[1]:
+        disp[:, :min(ndisp, disp.shape[1])] = np.nan
+        valid[:, :min(ndisp, disp.shape[1])] = False
     visualize.show_disparity_heatmap(disp, str(output / "disparity.png"))
-    logger.info("Stage 2 disparity end: shape=%s", disp.shape)
+    logger.info("Stage 2 disparity end: shape=%s valid=%.1f%%",
+                disp.shape, 100.0 * float(valid.mean()))
 
     logger.info("Stage 3 depth start: shape=%s", disp.shape)
-    depth = disparity_to_depth(disp, float(K1[0, 0]), float(np.linalg.norm(stereo["T"])))
+    safe_disp = np.where(np.isfinite(disp) & (disp > 0), disp, 0).astype(np.float32)
+    depth = disparity_to_depth(safe_disp, float(K1[0, 0]), float(np.linalg.norm(stereo["T"])))
+    depth = np.where(valid & np.isfinite(disp) & (disp > 0), depth, np.nan).astype(np.float32)
+    # Syllabus Module 1 (histogram) + Module 5 (smoothness): cap far tail.
+    # Tiny disparities -> huge Z stretched the preview axes to 1800+ mm.
+    depth, cap = pointcloud.cap_depth_outliers(depth, 99.0)
     np.save(output / "depth.npy", depth)
     logger.info("Stage 3 depth end: shape=%s", depth.shape)
 
     logger.info("Stage 4 point cloud start: disparity shape=%s", disp.shape)
-    points_3d = pointcloud.reproject_to_3d(disp, maps["Q"])
-    points, colors = pointcloud.build_point_cloud(points_3d, rect_left, disp)
+    points_3d = pointcloud.reproject_to_3d(safe_disp, maps["Q"])
+    # Re-apply image-space validity (border + LR + depth cap) before coloring.
+    depth_valid = np.isfinite(depth)
+    masked_disp = np.where(valid & depth_valid, filtered, np.nan).astype(np.float32)
+    points, colors = pointcloud.build_point_cloud(points_3d, rect_left, masked_disp)
+    # Syllabus Module 4 (statistical/clustering) outlier removal.
+    points, colors = pointcloud.clean_point_cloud(points, colors)
     pointcloud.save_ply(str(output / "pointcloud.ply"), points, colors)
     visualize.show_point_cloud_preview(points, colors, str(output / "pointcloud_preview.png"))
     logger.info("Stage 4 point cloud end: points shape=%s colors shape=%s", points.shape, colors.shape)
@@ -116,24 +147,31 @@ def run_scene_reconstruction(left_path, right_path, config, output_dir, intermed
     logger.info("Stage 1 rectified grayscale end: left=%s right=%s", gray_l.shape, gray_r.shape)
     logger.info("Stage 2 filtered disparity start: shape=%s", gray_l.shape)
     raw, filtered, valid = disparity.compute_disparity_filtered(gray_l, gray_r, settings)
+    # Occlusion strip: left border of width numDisparities has no right match
+    # (epipolar geometry, Module 2). This removes the smeared left-edge wall.
+    ndisp = settings.get("numDisparities", settings.get("num_disparities", 0))
+    try:
+        ndisp = int(ndisp)
+    except (TypeError, ValueError):
+        ndisp = 0
+    if ndisp > 0 and ndisp < filtered.shape[1]:
+        valid[:, :ndisp] = False
     filtered = np.where(valid, filtered, np.nan).astype(np.float32)
-    logger.info("Stage 2 filtered disparity end: raw=%s filtered=%s", raw.shape, filtered.shape)
+    logger.info("Stage 2 filtered disparity end: raw=%s filtered=%s valid=%.1f%%",
+                raw.shape, filtered.shape, 100.0 * float(valid.mean()))
     logger.info("Stage 3 depth start: shape=%s", filtered.shape)
     denominator = filtered + doffs
     depth = np.full(filtered.shape, np.nan, np.float32)
     np.divide(baseline * f, denominator, out=depth, where=np.isfinite(denominator) & (denominator > 0))
-    finite = depth[np.isfinite(depth)]
-    if finite.size:
-        cap = float(np.percentile(finite, 99.5))
-        depth = np.where(np.isfinite(depth) & (depth <= cap), depth, np.nan).astype(np.float32)
-        logger.info("Stage 3 depth range capped at %.1f mm (99.5th percentile)", cap)
+    depth, cap = pointcloud.cap_depth_outliers(depth, 99.5)
     np.save(output / "depth.npy", depth)
     logger.info("Stage 3 depth end: shape=%s; saved %s", depth.shape, output / "depth.npy")
     logger.info("Stage 4 point cloud start: shape=%s", depth.shape)
     v, u = np.indices(depth.shape, dtype=np.float32)
     xyz = np.stack(((u - cx) * depth / f, (v - cy) * depth / f, depth), axis=-1)
     finite = np.isfinite(xyz).all(axis=-1)
-    points, colors = xyz[finite], cv2.cvtColor(left, cv2.COLOR_BGR2RGB)[finite]
+    points, colors = xyz[finite].astype(np.float32), cv2.cvtColor(left, cv2.COLOR_BGR2RGB)[finite]
+    points, colors = pointcloud.clean_point_cloud(points, colors, z_percentile=99.5)
     pointcloud.save_ply(str(output / "pointcloud.ply"), points, colors)
     visualize.show_point_cloud_preview(points, colors, str(output / "pointcloud_preview.png"))
     logger.info("Stage 4 point cloud end: points=%s colors=%s", points.shape, colors.shape)
